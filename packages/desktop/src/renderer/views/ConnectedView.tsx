@@ -16,6 +16,7 @@ import {
 } from '@tabler/icons-react';
 import type { DeviceInfo, TransferProgress, TransferQueueItem, Transfer, FileTransfer } from '@easyshare/shared';
 import { formatTransferSpeed, formatDuration, formatProgressInfo } from '@easyshare/shared';
+import { transferFileName, transferFileSize } from '../lib/transfer-display';
 import { ProgressBar } from '../components/ProgressBar';
 import { BorderBeam } from '../components/BorderBeam';
 
@@ -282,7 +283,7 @@ export function ConnectedView({
                     <p className="text-sm text-white truncate">
                       {transfer.type === 'text'
                         ? (transfer.content?.slice(0, 50) + (transfer.content && transfer.content.length > 50 ? '...' : ''))
-                        : transfer.fileName}
+                        : transferFileName(transfer)}
                     </p>
                     <p className="text-xs text-neutral-500">
                       {transfer.type === 'text' ? 'Text' : 'File'} • {formatTime(transfer.timestamp)}
@@ -437,7 +438,7 @@ export function ConnectedView({
                     </div>
                     <div>
                       <p className="text-white font-medium">
-                        {selectedTransfer.type === 'text' ? 'Text Message' : selectedTransfer.fileName}
+                        {selectedTransfer.type === 'text' ? 'Text Message' : transferFileName(selectedTransfer)}
                       </p>
                       <p className="text-xs text-neutral-500">
                         {selectedTransfer.direction === 'send' ? 'Sent' : 'Received'} • {formatTime(selectedTransfer.timestamp)}
@@ -470,8 +471,8 @@ export function ConnectedView({
                   ) : (
                     <div className="space-y-3">
                       <div className="text-neutral-400 text-sm space-y-2">
-                        <p><span className="text-neutral-500">File:</span> {selectedTransfer.fileName}</p>
-                        <p><span className="text-neutral-500">Size:</span> {((selectedTransfer.fileSize || 0) / 1024).toFixed(1)} KB</p>
+                        <p><span className="text-neutral-500">File:</span> {transferFileName(selectedTransfer)}</p>
+                        <p><span className="text-neutral-500">Size:</span> {(transferFileSize(selectedTransfer) / 1024).toFixed(1)} KB</p>
                         {(selectedTransfer as FileTransfer).speedBytesPerSec != null && (
                           <p>
                             <span className="text-neutral-500">Speed:</span> {formatTransferSpeed((selectedTransfer as FileTransfer).speedBytesPerSec!)}

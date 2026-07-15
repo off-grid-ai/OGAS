@@ -10,6 +10,8 @@
       "@shared/*": ["../shared/src/*"]
     },
     "types": ["node"],
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
     "skipLibCheck": true
   },
   "include": ["src/**/*"],

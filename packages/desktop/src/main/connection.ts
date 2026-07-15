@@ -85,7 +85,7 @@ export class ConnectionManager {
   // Transfer timing
   private transferStartTime: number = 0;
 
-  // Promise resolver for sendFile — resolved when transfer completes (file_ack or chunk complete)
+  // Promise resolver for sendFile - resolved when transfer completes (file_ack or chunk complete)
   private sendFileResolver: ((success: boolean) => void) | null = null;
 
   // Keepalive state
@@ -446,7 +446,7 @@ export class ConnectionManager {
         this.pendingFileChecksum = null;
       } else {
         // Large file: use HTTP transfer
-        // Skip expensive checksum computation — mobile verifies by file size,
+        // Skip expensive checksum computation - mobile verifies by file size,
         // and TCP ensures data integrity at the transport layer.
         const checksum = `size:${stats.size}`;
         const { url } = await this.startHttpFileServer(filePath, stats.size);
@@ -524,7 +524,7 @@ export class ConnectionManager {
       const stale = (Date.now() - this.lastPongReceived) > 30000;
 
       if (socketDead || stale) {
-        // Old socket is dead or stale — clean up and accept the new one
+        // Old socket is dead or stale - clean up and accept the new one
         console.log('Replacing dead/stale socket with new incoming connection');
         this.stopKeepalive();
         this.shutdownHttpServer();
@@ -532,7 +532,7 @@ export class ConnectionManager {
         this.socket = null;
         this.transferActive = false;
       } else {
-        // Existing socket is alive — reject the new one
+        // Existing socket is alive - reject the new one
         socket.destroy();
         return;
       }
@@ -576,7 +576,7 @@ export class ConnectionManager {
   }
 
   private handleMessage(message: Message): void {
-    // Any incoming message proves the connection is alive — reset keepalive timer.
+    // Any incoming message proves the connection is alive - reset keepalive timer.
     this.lastPongReceived = Date.now();
 
     switch (message.type) {
@@ -776,7 +776,7 @@ export class ConnectionManager {
     const settings = this.storageService.getSettings();
 
     // If sender included httpUrl, this is an HTTP download (desktop receives metadata only, mobile won't send chunks).
-    // We just accept and wait — mobile will download from httpUrl and send file_ack.
+    // We just accept and wait - mobile will download from httpUrl and send file_ack.
     // (This case shouldn't happen when desktop is the receiver from mobile,
     //  but handle it for completeness if both sides are desktops someday.)
     if (message.payload.httpUrl) {
@@ -824,7 +824,7 @@ export class ConnectionManager {
     const mimeType = this.pendingFileRequest.payload.mimeType;
 
     // If this is an HTTP send (desktop→mobile), the HTTP server is already running.
-    // Just wait for file_ack from mobile — no chunks to send.
+    // Just wait for file_ack from mobile - no chunks to send.
     if (this.httpSendingRequestId) {
       console.log('HTTP send: waiting for mobile to download and send file_ack...');
       // Transfer completion will be handled by handleFileAck()
@@ -1176,7 +1176,7 @@ export class ConnectionManager {
         let bytesSent = 0;
         let lastProgressTime = 0;
 
-        readStream.on('data', (chunk: Buffer) => {
+        readStream.on('data', (chunk: string | Buffer) => {
           bytesSent += chunk.length;
           const now = Date.now();
           if (now - lastProgressTime >= 100 && this.onTransferProgressCallback && this.httpSendingRequestId) {

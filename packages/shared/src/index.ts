@@ -16,6 +16,12 @@ export * from './transfer';
 // Message protocol
 export * from './protocol';
 
+// Ambient sharing (capture -> policy -> send)
+export * from './sharing';
+
+// Transfer session (the file-transfer state machine over transport/fs ports)
+export * from './session';
+
 // Version info
 export const VERSION = '1.0.0';
 export const APP_NAME = 'EasyShare';

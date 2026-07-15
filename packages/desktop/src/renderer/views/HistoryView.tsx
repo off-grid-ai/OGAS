@@ -10,6 +10,7 @@ import {
   IconFolderOpen,
 } from '@tabler/icons-react';
 import type { Transfer, FileTransfer } from '@easyshare/shared';
+import { transferFileName, transferFileSize } from '../lib/transfer-display';
 import { formatTransferSpeed, formatDuration } from '@easyshare/shared';
 import { TransferItem } from '../components/TransferItem';
 
@@ -180,7 +181,7 @@ export function HistoryView({ transfers, onClear }: HistoryViewProps) {
                     </div>
                     <div>
                       <p className="text-white font-medium">
-                        {selectedTransfer.type === 'text' ? 'Text Message' : selectedTransfer.fileName}
+                        {selectedTransfer.type === 'text' ? 'Text Message' : transferFileName(selectedTransfer)}
                       </p>
                       <p className="text-xs text-neutral-500">
                         {selectedTransfer.direction === 'send' ? 'Sent' : 'Received'} • {formatTime(selectedTransfer.timestamp)}
@@ -211,8 +212,8 @@ export function HistoryView({ transfers, onClear }: HistoryViewProps) {
                   ) : (
                     <div className="space-y-3">
                       <div className="text-neutral-400 text-sm space-y-2">
-                        <p><span className="text-neutral-500">File:</span> {selectedTransfer.fileName}</p>
-                        <p><span className="text-neutral-500">Size:</span> {((selectedTransfer.fileSize || 0) / 1024).toFixed(1)} KB</p>
+                        <p><span className="text-neutral-500">File:</span> {transferFileName(selectedTransfer)}</p>
+                        <p><span className="text-neutral-500">Size:</span> {(transferFileSize(selectedTransfer) / 1024).toFixed(1)} KB</p>
                         {(selectedTransfer as FileTransfer).speedBytesPerSec != null && (
                           <p>
                             <span className="text-neutral-500">Speed:</span> {formatTransferSpeed((selectedTransfer as FileTransfer).speedBytesPerSec!)}

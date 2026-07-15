@@ -8,10 +8,12 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "package": "electron-builder",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test 'test/*.test.mts'"
   },
   "dependencies": {
     "@easyshare/shared": "*",
+    "@offgrid/design": "file:../../../shared/packages/design",
     "@tabler/icons-react": "^2.47.0",
     "bonjour-service": "^1.2.1",
     "electron-store": "^8.1.0",
