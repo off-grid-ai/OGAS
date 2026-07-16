@@ -1,86 +1,136 @@
-// Desktop sharing integration test - the real thing end to end. A capture on
-// device A flows through the real AmbientShareService (policy + queue) -> the
-// real SessionRegistry (FileSender) -> two real TransferSessions -> a REAL TCP
-// loopback socket pair -> the real FsFileStore writing to a REAL temp directory.
-// Nothing is faked: the socket is an actual net connection, the filesystem is
-// actual disk. The asserted artifact is the file that lands in B's save dir,
-// byte-identical. Deleting the policy, the registry routing, or the transfer
-// logic makes this go red.
+// Desktop ambient-sharing integration test - the REAL integration, not a bypass.
+// Two real ConnectionManagers pair over a real TCP loopback and connect; then the
+// real AmbientShareService, driving the real ConnectionFileSender over
+// ConnectionManager A's actual transfer, shares a captured screenshot. The
+// asserted artifact is the file that ConnectionManager B writes to its real save
+// directory on disk, byte-identical. The only fake is the persistence boundary
+// (an in-memory ConnectionStorage); the sockets, transfer, and filesystem are all
+// real. Breaking the policy or the sender routing makes this go red.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import * as net from 'net';
 import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
 import {
-  deriveSharedSecret,
   AmbientShareService,
-  SessionRegistry,
   emptyPolicy,
   setRule,
   ANY_DESTINATION,
+  generateDeviceId,
 } from '@easyshare/shared';
-import type { CaptureEvent, ReceivedFile } from '@easyshare/shared';
+import type { AppSettings, PairedDevice, ConnectionState, CaptureEvent } from '@easyshare/shared';
 
-import { FsFileStore } from '../src/main/sharing/fs-file-store.ts';
-import { SocketChannel } from '../src/main/sharing/socket-channel.ts';
+import { ConnectionManager } from '../src/main/connection.ts';
+import type { ConnectionStorage } from '../src/main/connection-storage.ts';
+import { ConnectionFileSender } from '../src/main/sharing/connection-file-sender.ts';
 
-const SENDER = 'deskA';
-const RECEIVER = 'deskB';
-const SECRET = deriveSharedSecret('license-key', SENDER, RECEIVER);
+/** In-memory persistence - the only faked boundary. */
+class MemoryStorage implements ConnectionStorage {
+  readonly paired: PairedDevice[] = [];
+  private readonly settings: AppSettings;
+  constructor(settings: AppSettings) {
+    this.settings = settings;
+  }
+  getSettings(): AppSettings {
+    return this.settings;
+  }
+  addPairedDevice(device: PairedDevice): void {
+    this.paired.push(device);
+  }
+}
 
-/** Bring up a real loopback TCP socket pair (server accepts one client). */
-function socketPair(): Promise<{ client: net.Socket; server: net.Socket; close: () => void }> {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.on('error', reject);
-    srv.listen(0, '127.0.0.1', () => {
-      const { port } = srv.address() as net.AddressInfo;
-      const client = net.createConnection(port, '127.0.0.1');
-      srv.once('connection', (server) => {
-        client.once('connect', () =>
-          resolve({
-            client,
-            server,
-            close: () => {
-              client.destroy();
-              server.destroy();
-              srv.close();
-            },
-          })
-        );
-        // if connect already fired
-        if (!client.connecting) {
-          resolve({
-            client,
-            server,
-            close: () => {
-              client.destroy();
-              server.destroy();
-              srv.close();
-            },
-          });
-        }
-      });
-    });
-  });
+function settingsFor(deviceName: string, saveDir: string): AppSettings {
+  return {
+    deviceName,
+    deviceId: generateDeviceId(),
+    autoAcceptFromPaired: true,
+    saveDirectory: saveDir,
+    notificationsEnabled: false,
+  };
 }
 
 async function tmpDir(prefix: string): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
-async function waitFor(predicate: () => boolean, tries = 100): Promise<boolean> {
+async function waitFor(predicate: () => boolean, tries = 200): Promise<boolean> {
   for (let i = 0; i < tries; i++) {
     if (predicate()) return true;
-    await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 10));
   }
   return predicate();
 }
 
-function screenshot(capturePath: string, size: number): CaptureEvent {
+interface Rig {
+  a: ConnectionManager;
+  b: ConnectionManager;
+  sender: ConnectionFileSender;
+  bDeviceId: string;
+  bSaveDir: string;
+  aCaptureDir: string;
+  receivedOnB: string[];
+  close: () => Promise<void>;
+}
+
+/** Stand up two paired, connected ConnectionManagers over real TCP loopback. */
+async function pairedRig(): Promise<Rig> {
+  const aCaptureDir = await tmpDir('ogas-a-');
+  const bSaveDir = await tmpDir('ogas-b-');
+  const storageA = new MemoryStorage(settingsFor('Laptop-A', aCaptureDir));
+  const storageB = new MemoryStorage(settingsFor('Laptop-B', bSaveDir));
+
+  const a = new ConnectionManager(storageA, '127.0.0.1');
+  const b = new ConnectionManager(storageB, '127.0.0.1');
+  await a.start();
+  await b.start();
+
+  const sender = new ConnectionFileSender(a);
+  const receivedOnB: string[] = [];
+  b.onTransferComplete((t) => {
+    if (t.type === 'file') receivedOnB.push(t.fileName);
+  });
+
+  let aPaired = false;
+  let bPaired = false;
+  a.onConnectionStateChange((s: ConnectionState) => {
+    sender.updateConnection(s);
+    if (s.pairingStep === 'success') aPaired = true;
+  });
+  b.onConnectionStateChange((s: ConnectionState) => {
+    if (s.pairingStep === 'success') bPaired = true;
+  });
+  // Responder auto-answers the pairing prompt with the shared passphrase.
+  b.onPairingRequest(() => b.respondToPairing('shared-secret'));
+
+  const bInfo = b.getServerInfo();
+  const bDeviceId = bInfo.id;
+  // getServerInfo() reports host '' (the app advertises via mDNS); dial loopback.
+  await a.connectToDevice({ ...bInfo, host: '127.0.0.1' });
+  await a.startPairing(bDeviceId, 'shared-secret');
+
+  const paired = await waitFor(() => aPaired && bPaired);
+  assert.ok(paired, 'the two devices should pair over real TCP');
+
+  return {
+    a,
+    b,
+    sender,
+    bDeviceId,
+    bSaveDir,
+    aCaptureDir,
+    receivedOnB,
+    close: async () => {
+      await a.stop();
+      await b.stop();
+      await fs.rm(aCaptureDir, { recursive: true, force: true });
+      await fs.rm(bSaveDir, { recursive: true, force: true });
+    },
+  };
+}
+
+function screenshotEvent(capturePath: string, size: number): CaptureEvent {
   return {
     id: 'cap-1',
     source: 'screenshot',
@@ -92,31 +142,13 @@ function screenshot(capturePath: string, size: number): CaptureEvent {
   };
 }
 
-test('auto: a real screenshot lands in the receiver save dir over real TCP', async () => {
-  const sendDir = await tmpDir('ogas-send-');
-  const recvDir = await tmpDir('ogas-recv-');
-  const { client, server, close } = await socketPair();
-
+test('auto: a captured screenshot lands on the paired device, byte-identical', async () => {
+  const rig = await pairedRig();
   try {
-    // A ~200 KB file forces multi-chunk transfer over the real socket.
-    const bytes = Buffer.alloc(200 * 1024);
-    for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 37) & 0xff;
-    const capturePath = path.join(sendDir, 'shot.png');
+    const bytes = Buffer.alloc(120 * 1024);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 31) & 0xff;
+    const capturePath = path.join(rig.aCaptureDir, 'shot.png');
     await fs.writeFile(capturePath, bytes);
-
-    // Receiver: a real registry + real session over the server socket.
-    const recvStore = new FsFileStore(recvDir);
-    const received: ReceivedFile[] = [];
-    const recvRegistry = new SessionRegistry({
-      fileStore: recvStore,
-      onFileReceived: (_id, f) => received.push(f),
-    });
-    recvRegistry.connect(SENDER, new SocketChannel(server), SECRET);
-
-    // Sender: registry + AmbientShareService with an auto rule for screenshots.
-    const sendStore = new FsFileStore(sendDir);
-    const sendRegistry = new SessionRegistry({ fileStore: sendStore });
-    sendRegistry.connect(RECEIVER, new SocketChannel(client), SECRET);
 
     const policy = setRule(emptyPolicy(), {
       source: 'screenshot',
@@ -125,39 +157,27 @@ test('auto: a real screenshot lands in the receiver save dir over real TCP', asy
     });
     const svc = new AmbientShareService({
       getPolicy: () => policy,
-      getDestinations: () => [{ deviceId: RECEIVER, connected: true }],
-      sender: sendRegistry,
+      getDestinations: () => [{ deviceId: rig.bDeviceId, connected: true }],
+      sender: rig.sender,
     });
 
-    await svc.handleCapture(screenshot(capturePath, bytes.length));
-    await waitFor(() => received.length > 0);
+    await svc.handleCapture(screenshotEvent(capturePath, bytes.length));
+    const landed = await waitFor(() => rig.receivedOnB.includes('shot.png'));
+    assert.ok(landed, 'B should report receiving shot.png');
 
-    const landedPath = path.join(recvDir, 'shot.png');
-    const landed = await fs.readFile(landedPath).catch(() => null);
-    assert.ok(landed, 'file should exist in the receiver save dir');
-    assert.ok(landed!.equals(bytes), 'received bytes must equal the original');
+    const onDisk = await fs.readFile(path.join(rig.bSaveDir, 'shot.png')).catch(() => null);
+    assert.ok(onDisk, 'the file should be written to B save dir');
+    assert.ok(onDisk!.equals(bytes), 'received bytes must equal the original');
   } finally {
-    close();
-    await fs.rm(sendDir, { recursive: true, force: true });
-    await fs.rm(recvDir, { recursive: true, force: true });
+    await rig.close();
   }
 });
 
-test('off: nothing is written; the receiver save dir stays empty', async () => {
-  const sendDir = await tmpDir('ogas-send-');
-  const recvDir = await tmpDir('ogas-recv-');
-  const { client, server, close } = await socketPair();
-
+test('off: nothing is transferred; B save dir stays empty', async () => {
+  const rig = await pairedRig();
   try {
-    const capturePath = path.join(sendDir, 'shot.png');
-    await fs.writeFile(capturePath, Buffer.from('secret'));
-
-    const recvStore = new FsFileStore(recvDir);
-    const recvRegistry = new SessionRegistry({ fileStore: recvStore });
-    recvRegistry.connect(SENDER, new SocketChannel(server), SECRET);
-
-    const sendRegistry = new SessionRegistry({ fileStore: new FsFileStore(sendDir) });
-    sendRegistry.connect(RECEIVER, new SocketChannel(client), SECRET);
+    const capturePath = path.join(rig.aCaptureDir, 'shot.png');
+    await fs.writeFile(capturePath, Buffer.from('secret bytes'));
 
     const off = setRule(emptyPolicy(), {
       source: 'screenshot',
@@ -166,25 +186,17 @@ test('off: nothing is written; the receiver save dir stays empty', async () => {
     });
     const svc = new AmbientShareService({
       getPolicy: () => off,
-      getDestinations: () => [{ deviceId: RECEIVER, connected: true }],
-      sender: sendRegistry,
+      getDestinations: () => [{ deviceId: rig.bDeviceId, connected: true }],
+      sender: rig.sender,
     });
 
-    await svc.handleCapture(screenshot(capturePath, 6));
-    await new Promise((r) => setTimeout(r, 50));
+    await svc.handleCapture(screenshotEvent(capturePath, 12));
+    await new Promise((r) => setTimeout(r, 150));
 
-    const entries = await fs.readdir(recvDir);
-    assert.deepEqual(entries, [], 'off mode must write nothing to the receiver');
+    const entries = (await fs.readdir(rig.bSaveDir)).filter((f) => !f.startsWith('.'));
+    assert.deepEqual(entries, [], 'off mode must transfer nothing');
+    assert.equal(rig.receivedOnB.length, 0, 'B received nothing');
   } finally {
-    close();
-    await fs.rm(sendDir, { recursive: true, force: true });
-    await fs.rm(recvDir, { recursive: true, force: true });
+    await rig.close();
   }
-});
-
-test('registry: sendFile to an unknown device returns false (no session)', async () => {
-  const registry = new SessionRegistry({ fileStore: new FsFileStore(await tmpDir('ogas-x-')) });
-  const ok = await registry.sendFile('ghost', '/nope', 'x.png', 'image/png');
-  assert.equal(ok, false, 'no session for the device -> send fails cleanly');
-  assert.deepEqual(registry.connectedDeviceIds(), [], 'no devices connected');
 });

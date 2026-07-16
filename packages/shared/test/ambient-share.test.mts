@@ -1,19 +1,15 @@
-// Integration tests for ambient sharing. Two real devices (TransferSessions)
-// talk over an in-memory channel pair; the AmbientShareService drives sends from
-// the real policy + queue. The ONLY fakes are the socket (ByteChannel) and the
-// disk (FileStore). The asserted terminal artifact is always the file that lands
-// on the RECEIVER, byte-identical - never a spy or an internal field. Deleting
-// the policy, the chunking, or the integrity check makes these go red.
+// Integration tests for the shared ambient-sharing layer. The real
+// AmbientShareService + policy + queue run over a behavior-faithful fake
+// transport (FakeTransport = the FileSender boundary to the app's transfer).
+// The observable outcome asserted is which files the transport delivered, plus
+// the user-facing prompt for 'ask'. The REAL end-to-end (bytes landing over a
+// real socket) is proven in the desktop integration test that drives the actual
+// ConnectionManager. Deleting the policy or the queue makes these go red.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-// Import the REAL code through the built package entry (the source uses
-// extensionless directory imports that Node's ESM runtime can't resolve; the
-// bundle is the same code). Nothing here is mocked.
 import {
-  deriveSharedSecret,
-  TransferSession,
   AmbientShareService,
   emptyPolicy,
   setRule,
@@ -21,96 +17,25 @@ import {
   shouldEmit,
   createEmitGuardState,
 } from '../dist/index.js';
-import type {
-  ReceivedFile,
-  FileSender,
-  SharePrompt,
-  CaptureEvent,
-  DestinationState,
-  SharePolicy,
-} from '../dist/index.js';
-import {
-  InMemoryFileStore,
-  createChannelPair,
-  makeBytes,
-  bytesEqual,
-  waitFor,
-  type FrameTransform,
-} from './harness/memory.mts';
+import type { CaptureEvent, DestinationState, SharePolicy, SharePrompt } from '../dist/index.js';
+import { FakeTransport, waitFor } from './harness/transport.mts';
 
-const SENDER = 'devA';
 const RECEIVER = 'devB';
-const SECRET = deriveSharedSecret('shared-license-key', SENDER, RECEIVER);
-
-// A 150 KB file forces multi-chunk transfer (3 x 64 KB), exercising chunking +
-// reassembly rather than a trivial single-chunk path.
-const CAPTURE_PATH = '/A/captures/shot.png';
-const CAPTURE_BYTES = makeBytes(150 * 1024, 7);
 
 function screenshot(): CaptureEvent {
   return {
     id: 'cap-1',
     source: 'screenshot',
-    path: CAPTURE_PATH,
+    path: '/A/captures/shot.png',
     fileName: 'shot.png',
-    fileSize: CAPTURE_BYTES.length,
+    fileSize: 150 * 1024,
     mimeType: 'image/png',
     capturedAt: 1_000,
   };
 }
 
-interface World {
-  fsB: InMemoryFileStore;
-  received: ReceivedFile[];
-  sender: FileSender;
-  reconnect: (deviceId: string) => void;
-  setConnected: (ids: string[]) => void;
-}
-
-function makeWorld(transformAToB?: FrameTransform): World {
-  const fsA = new InMemoryFileStore('/A/inbound');
-  const fsB = new InMemoryFileStore('/B/inbound');
-  fsA.seed(CAPTURE_PATH, CAPTURE_BYTES);
-
-  const { a, b } = createChannelPair(transformAToB);
-  const received: ReceivedFile[] = [];
-
-  // Both real sessions. Sender side sends; receiver side reassembles + writes.
-  const sessionA = new TransferSession({ channel: a, fileStore: fsA, secretKey: SECRET });
-  // eslint-disable-next-line no-new -- receiver wires itself via its channel handler
-  new TransferSession({
-    channel: b,
-    fileStore: fsB,
-    secretKey: SECRET,
-    onFileReceived: (f) => received.push(f),
-  });
-
-  let connected: string[] = [RECEIVER];
-  const reconnectHandlers: Array<(deviceId: string) => void> = [];
-
-  const sender: FileSender = {
-    connectedDeviceIds: () => connected,
-    sendFile: async (_deviceId, path, fileName, mimeType) =>
-      (await sessionA.sendFile(path, fileName, mimeType)).success,
-    onReconnect: (handler) => {
-      reconnectHandlers.push(handler);
-      return () => {};
-    },
-  };
-
-  return {
-    fsB,
-    received,
-    sender,
-    reconnect: (id) => reconnectHandlers.forEach((h) => h(id)),
-    setConnected: (ids) => {
-      connected = ids;
-    },
-  };
-}
-
 function service(
-  world: World,
+  transport: FakeTransport,
   policy: SharePolicy,
   destinations: DestinationState[],
   onPrompt?: (p: SharePrompt) => void
@@ -118,31 +43,30 @@ function service(
   return new AmbientShareService({
     getPolicy: () => policy,
     getDestinations: () => destinations,
-    sender: world.sender,
+    sender: transport,
     onPrompt,
     now: () => 5_000,
   });
 }
 
-test('auto: a captured screenshot lands on the receiver byte-identical', async () => {
-  const world = makeWorld();
+test('auto: a captured screenshot is delivered to a connected device', async () => {
+  const transport = new FakeTransport([RECEIVER]);
   const policy = setRule(emptyPolicy(), {
     source: 'screenshot',
     destinationId: ANY_DESTINATION,
     mode: 'auto',
   });
-  const svc = service(world, policy, [{ deviceId: RECEIVER, connected: true }]);
 
-  await svc.handleCapture(screenshot());
+  await service(transport, policy, [{ deviceId: RECEIVER, connected: true }]).handleCapture(
+    screenshot()
+  );
 
-  const landed = world.fsB.files.get('/B/inbound/shot.png');
-  assert.ok(landed, 'file should exist on the receiver');
-  assert.ok(bytesEqual(landed, CAPTURE_BYTES), 'received bytes must equal the original');
-  assert.equal(world.received.length, 1);
+  assert.equal(transport.count(RECEIVER), 1, 'auto should deliver to the connected device');
+  assert.equal(transport.delivered[0].path, '/A/captures/shot.png');
 });
 
-test('off: nothing is sent; flipping the rule to auto makes it land (guard is real)', async () => {
-  const world = makeWorld();
+test('off: nothing is delivered; flipping the rule to auto delivers (guard is real)', async () => {
+  const transport = new FakeTransport([RECEIVER]);
   const dest = [{ deviceId: RECEIVER, connected: true }];
 
   const off = setRule(emptyPolicy(), {
@@ -150,21 +74,16 @@ test('off: nothing is sent; flipping the rule to auto makes it land (guard is re
     destinationId: ANY_DESTINATION,
     mode: 'off',
   });
-  await service(world, off, dest).handleCapture(screenshot());
-  assert.equal(world.fsB.files.has('/B/inbound/shot.png'), false, 'off must not send');
+  await service(transport, off, dest).handleCapture(screenshot());
+  assert.equal(transport.count(), 0, 'off must deliver nothing');
 
-  // Falsify: same world, same capture, mode auto -> it must now land.
-  const auto = setRule(off, {
-    source: 'screenshot',
-    destinationId: ANY_DESTINATION,
-    mode: 'auto',
-  });
-  await service(world, auto, dest).handleCapture(screenshot());
-  assert.ok(world.fsB.files.get('/B/inbound/shot.png'), 'auto must send');
+  const auto = setRule(off, { source: 'screenshot', destinationId: ANY_DESTINATION, mode: 'auto' });
+  await service(transport, auto, dest).handleCapture(screenshot());
+  assert.equal(transport.count(), 1, 'auto must deliver');
 });
 
-test('ask: no bytes move until the user confirms, then the file lands', async () => {
-  const world = makeWorld();
+test('ask: nothing is delivered until the user confirms', async () => {
+  const transport = new FakeTransport([RECEIVER]);
   const policy = setRule(emptyPolicy(), {
     source: 'screenshot',
     destinationId: ANY_DESTINATION,
@@ -172,22 +91,40 @@ test('ask: no bytes move until the user confirms, then the file lands', async ()
   });
 
   let prompt: SharePrompt | undefined;
-  const svc = service(world, policy, [{ deviceId: RECEIVER, connected: true }], (p) => {
+  await service(transport, policy, [{ deviceId: RECEIVER, connected: true }], (p) => {
     prompt = p;
-  });
+  }).handleCapture(screenshot());
 
-  await svc.handleCapture(screenshot());
   assert.ok(prompt, 'ask mode must surface a prompt');
-  assert.equal(world.fsB.files.has('/B/inbound/shot.png'), false, 'nothing before confirm');
+  assert.equal(transport.count(), 0, 'nothing delivered before confirm');
 
   const ok = await prompt!.confirm();
-  assert.equal(ok, true, 'confirm resolves true once the peer verifies receipt');
-  assert.ok(world.fsB.files.get('/B/inbound/shot.png'), 'file lands after confirm');
+  assert.equal(ok, true, 'confirm resolves true once the peer accepts');
+  assert.equal(transport.count(RECEIVER), 1, 'file delivered after confirm');
 });
 
-test('offline + queue: held while disconnected, drains and lands on reconnect', async () => {
-  const world = makeWorld();
-  world.setConnected([]); // receiver not reachable
+test('per-device override: auto to my laptop, off to a friend', async () => {
+  const MINE = 'my-laptop';
+  const FRIEND = 'friend-phone';
+  const transport = new FakeTransport([MINE, FRIEND]);
+  let policy = setRule(emptyPolicy(), {
+    source: 'screenshot',
+    destinationId: ANY_DESTINATION,
+    mode: 'auto',
+  });
+  policy = setRule(policy, { source: 'screenshot', destinationId: FRIEND, mode: 'off' });
+
+  await service(transport, policy, [
+    { deviceId: MINE, connected: true },
+    { deviceId: FRIEND, connected: true },
+  ]).handleCapture(screenshot());
+
+  assert.equal(transport.count(MINE), 1, 'auto to my laptop');
+  assert.equal(transport.count(FRIEND), 0, 'off to the friend (device rule overrides the default)');
+});
+
+test('offline + queue: held while disconnected, delivered on reconnect', async () => {
+  const transport = new FakeTransport([]); // receiver offline
   const policy: SharePolicy = {
     ...setRule(emptyPolicy('queue'), {
       source: 'screenshot',
@@ -196,73 +133,53 @@ test('offline + queue: held while disconnected, drains and lands on reconnect', 
     }),
     offlineBehavior: 'queue',
   };
-  const svc = service(world, policy, [{ deviceId: RECEIVER, connected: false }]);
+  const svc = service(transport, policy, [{ deviceId: RECEIVER, connected: false }]);
 
   await svc.handleCapture(screenshot());
-  assert.equal(world.fsB.files.has('/B/inbound/shot.png'), false, 'offline: nothing sent yet');
+  assert.equal(transport.count(), 0, 'offline: nothing delivered yet');
   assert.equal(svc.pending.length, 1, 'the share is queued');
 
-  // Reconnect -> the service drains the queue.
-  world.setConnected([RECEIVER]);
-  world.reconnect(RECEIVER);
-  const landed = await waitFor(() => world.fsB.files.has('/B/inbound/shot.png'));
+  transport.bringOnline(RECEIVER);
+  const delivered = await waitFor(() => transport.count(RECEIVER) > 0);
 
-  assert.ok(landed, 'queued file lands after reconnect');
-  assert.ok(bytesEqual(world.fsB.files.get('/B/inbound/shot.png')!, CAPTURE_BYTES));
-  assert.equal(svc.pending.length, 0, 'queue is cleared after a successful drain');
+  assert.ok(delivered, 'queued file is delivered after reconnect');
+  assert.equal(svc.pending.length, 0, 'queue cleared after a successful drain');
 });
 
-test('integrity: a corrupted chunk on the wire means NO file is written', async () => {
-  // Corrupt the 2nd frame A->B (the first file chunk). The request (frame 0) and
-  // the rest arrive intact, so pairing/accept succeed but reassembly is short a
-  // chunk -> the receiver must reject and write nothing.
-  let frameIndex = 0;
-  const tamper: FrameTransform = (frame) => {
-    const corrupt = frameIndex === 1;
-    frameIndex += 1;
-    if (!corrupt) return frame;
-    const copy = frame.slice();
-    copy[copy.length - 1] ^= 0xff; // flip a ciphertext byte
-    return copy;
-  };
-  const world = makeWorld(tamper);
-  const policy = setRule(emptyPolicy(), {
+test('offline + skip: dropped, not queued', async () => {
+  const transport = new FakeTransport([]);
+  const policy = setRule(emptyPolicy('skip'), {
     source: 'screenshot',
     destinationId: ANY_DESTINATION,
     mode: 'auto',
   });
+  const svc = service(transport, policy, [{ deviceId: RECEIVER, connected: false }]);
 
-  await service(world, policy, [{ deviceId: RECEIVER, connected: true }]).handleCapture(
-    screenshot()
-  );
+  await svc.handleCapture(screenshot());
+  assert.equal(svc.pending.length, 0, 'skip must not queue');
 
-  assert.equal(
-    world.fsB.files.has('/B/inbound/shot.png'),
-    false,
-    'a corrupted transfer must never write a partial/wrong file'
-  );
-  assert.equal(world.received.length, 0, 'no received-file event on integrity failure');
+  transport.bringOnline(RECEIVER);
+  await waitFor(() => transport.count() > 0, 5);
+  assert.equal(transport.count(), 0, 'nothing is delivered on reconnect (it was skipped)');
 });
 
 test('anti-loop: a file already in the inbound dir is not re-emitted for sharing', () => {
-  const inbound = new InMemoryFileStore('/B/inbound');
   const guard = createEmitGuardState();
   const options = { ignoredPathPrefixes: ['/B/inbound'] };
 
-  const receivedFile: CaptureEvent = {
+  const inbound: CaptureEvent = {
     id: 'inbound-1',
     source: 'file',
-    path: inbound.inboundPath('shot.png'), // '/B/inbound/shot.png'
+    path: '/B/inbound/shot.png',
     fileName: 'shot.png',
     fileSize: 10,
     mimeType: 'image/png',
     capturedAt: 2_000,
   };
-  assert.equal(shouldEmit(receivedFile, guard, options), false, 'inbound file must be ignored');
+  assert.equal(shouldEmit(inbound, guard, options), false, 'inbound file must be ignored');
 
-  // Falsify: a genuine capture outside the inbound dir IS emitted.
-  const realCapture: CaptureEvent = { ...receivedFile, id: 'real-1', path: '/A/captures/shot.png' };
-  assert.equal(shouldEmit(realCapture, guard, options), true, 'real capture must emit');
+  const real: CaptureEvent = { ...inbound, id: 'real-1', path: '/A/captures/shot.png' };
+  assert.equal(shouldEmit(real, guard, options), true, 'a real capture must emit');
 });
 
 test('anti-storm: the same capture inside the dedup window is emitted once', () => {
@@ -278,8 +195,14 @@ test('anti-storm: the same capture inside the dedup window is emitted once', () 
   };
 
   assert.equal(shouldEmit(event, guard, { dedupWindowMs: 10_000 }), true, 'first emit accepted');
-  const dup = { ...event, capturedAt: 3_500 };
-  assert.equal(shouldEmit(dup, guard, { dedupWindowMs: 10_000 }), false, 'duplicate suppressed');
-  const later = { ...event, capturedAt: 20_000 };
-  assert.equal(shouldEmit(later, guard, { dedupWindowMs: 10_000 }), true, 're-emit after window');
+  assert.equal(
+    shouldEmit({ ...event, capturedAt: 3_500 }, guard, { dedupWindowMs: 10_000 }),
+    false,
+    'duplicate within window suppressed'
+  );
+  assert.equal(
+    shouldEmit({ ...event, capturedAt: 20_000 }, guard, { dedupWindowMs: 10_000 }),
+    true,
+    're-emit after the window'
+  );
 });

@@ -16,11 +16,10 @@ export * from './transfer';
 // Message protocol
 export * from './protocol';
 
-// Ambient sharing (capture -> policy -> send)
+// Ambient sharing (capture -> policy -> send). The transport itself stays in the
+// app (its existing streaming + HTTP-accelerated transfer); this layer decides
+// WHAT to share, to WHOM, and WHEN, and drives sending through the FileSender port.
 export * from './sharing';
-
-// Transfer session (the file-transfer state machine over transport/fs ports)
-export * from './session';
 
 // Version info
 export const VERSION = '1.0.0';

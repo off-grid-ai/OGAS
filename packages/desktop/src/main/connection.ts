@@ -49,7 +49,7 @@ import {
   getPairedDevice,
   CHUNK_SIZE,
 } from '@easyshare/shared';
-import type { StorageService } from './storage';
+import type { ConnectionStorage } from './connection-storage';
 
 export class ConnectionManager {
   private server: net.Server | null = null;
@@ -60,7 +60,7 @@ export class ConnectionManager {
   private currentPairingState: ReturnType<typeof createPairingState> | null = null;
   private pendingPassphrase: string | null = null;
   private localDevice: DeviceInfo | null = null;
-  private storageService: StorageService;
+  private storageService: ConnectionStorage;
   private localIp: string = '';
   private connectedViaEmulator: boolean = false;
 
@@ -105,7 +105,7 @@ export class ConnectionManager {
   // Store pending pairing message when waiting for user passphrase
   private pendingPairingMessage: Message | null = null;
 
-  constructor(storageService: StorageService, localIp?: string) {
+  constructor(storageService: ConnectionStorage, localIp?: string) {
     this.storageService = storageService;
     this.localIp = localIp || '';
   }

@@ -1,7 +1,8 @@
 // AmbientShareService - the owning service for the "capture -> policy -> send"
 // flow. It holds the pending-share queue and coordinates the pure decision
-// engine (policy.ts) with an injected FileSender (satisfied in the app by a
-// registry of TransferSessions, one per paired device). No I/O of its own: it
+// engine (policy.ts) with an injected FileSender (satisfied in each app by an
+// adapter over its EXISTING device-to-device transfer - the battle-tested one
+// that already streams and HTTP-accelerates large files). No I/O of its own: it
 // decides, then delegates sending to the port.
 
 import type { CaptureEvent, DestinationState, ShareDecision, SharePolicy } from './types';
@@ -10,7 +11,7 @@ import { enqueue, pendingFor, remove, type PendingShare } from './queue';
 
 /**
  * Sends a captured file to a specific paired device and reports connectivity.
- * The app implements this over its TransferSessions; a send resolves true only
+ * The app implements this over its existing transfer; a send resolves true only
  * when the receiver has written and verified the file.
  */
 export interface FileSender {

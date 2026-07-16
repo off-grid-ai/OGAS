@@ -9,7 +9,7 @@
     "preview": "electron-vite preview",
     "package": "electron-builder",
     "typecheck": "tsc --noEmit",
-    "test": "node --test 'test/*.test.mts'"
+    "test": "node --test --test-force-exit 'test/*.test.mts'"
   },
   "dependencies": {
     "@easyshare/shared": "*",
