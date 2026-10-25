@@ -24,7 +24,7 @@
     "@vitejs/plugin-react": "^4.2.1",
     "7zip-bin": "^5.2.0",
     "autoprefixer": "^10.4.16",
-    "electron": "33.2.0",
+    "electron": "42.11.16",
     "electron-builder": "^26.4.0",
     "electron-vite": "^2.0.0",
     "postcss": "^8.4.32",
